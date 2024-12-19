@@ -272,3 +272,19 @@ Experiments are tested on ascend 910* with mindspore 2.3.1 graph mode.
 | model name | cards | batch size | resolution | precision | jit level | graph compile | s/step | PSNR  | SSIM |                      recipe                       |
 |:----------:|:-----:|:----------:|:----------:|:---------:|:---------:|:-------------:|:------:|:-----:|:----:|:-------------------------------------------------:|
 |    TAE     |   1   |     1      | 256x256x32 |   bf16    |    O0     |     2 min     |  2.18  | 31.35 | 0.92 | [config](configs/tae/train/mixed_256x256x32.yaml) |
+
+### Gradio Demo
+
+
+```shell
+python gradio_demo.py \
+--config configs/inference/moviegen_t2i_256x256.yaml \
+--model.name llama-5B \
+--model.pretrained_model_path /path/to/llama-5B.ckpt \
+--text_emb.ul2_dir /path/to/ul2-embedding.ckpt \
+--text_emb.metaclip_dir /path/to/metaclip-embedding.ckpt \
+--text_emb.byt5_dir /path/to/byt5-embedding.ckpt \
+--image_size 256 455  
+--num_frames 32  
+--save_format mp4
+```
