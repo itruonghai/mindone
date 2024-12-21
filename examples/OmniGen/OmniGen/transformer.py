@@ -11,7 +11,7 @@ from .activation import ACT2FN
 from mindone.transformers.modeling_outputs import (
     BaseModelOutputWithPast,
 )
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+# from transformers.cache_utils import Cache, DynamicCache, StaticCache
 import numpy as np
 import logging
 logger = logging.getLogger(__name__)
@@ -224,7 +224,7 @@ class Phi3Attention(nn.Cell):
         hidden_states: ms.Tensor,
         attention_mask: Optional[ms.Tensor] = None,
         position_ids: Optional[ms.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_value: Optional[ms.Tensor] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[ms.Tensor] = None,
@@ -256,9 +256,11 @@ class Phi3Attention(nn.Cell):
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        # FIX ME: temporal disable
+        # if past_key_value is not None:
+        #     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+        #     key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -379,6 +381,33 @@ class Phi3DecoderLayer(nn.Cell):
 
         return outputs
 
+    # FIX ME: add later
+# class Phi3PreTrainedModel(MSPreTrainedModel):
+#     config_class = Phi3Config
+#     base_model_prefix = "model"
+#     supports_gradient_checkpointing = True
+#     _no_split_modules = ["GemmaDecoderLayer"]
+#     _skip_keys_device_placement = ["past_key_values"]
+#     _supports_flash_attn_2 = True
+#     _supports_sdpa = True
+#     _supports_cache_class = True
+#     _supports_quantized_cache = True
+#     _supports_static_cache = True
+
+#     def _init_weights(self, module):
+#         std = self.config.initializer_range
+#         if isinstance(module, nn.Dense):
+#             module.weight.set_data(initializer(Normal(mean=0.0, sigma=std), module.weight.shape, module.weight.dtype))
+#             if module.bias is not None:
+#                 module.bias.set_data(initializer(Zero(), module.bias.shape, module.bias.dtype))
+#         elif isinstance(module, nn.Embedding):
+#             module.embedding_table.set_data(
+#                 initializer(Normal(mean=0.0, sigma=std), module.embedding_table.shape, module.embedding_table.dtype)
+#             )
+#             if module.padding_idx is not None:
+#                 module.embedding_table[module.padding_idx] = 0
+
+
 class Phi3Transformer(nn.Cell):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers.
@@ -428,7 +457,6 @@ class Phi3Transformer(nn.Cell):
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -440,21 +468,24 @@ class Phi3Transformer(nn.Cell):
                 use_cache = False
 
         # kept for BC (non `Cache` `past_key_values` inputs)
-        return_legacy_cache = False
-        if use_cache and not isinstance(past_key_values, Cache):
-            return_legacy_cache = True
-            if past_key_values is None:
-                past_key_values = DynamicCache()
-            else:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                print(
-                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
-                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
-                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
-                )
+        # TODO: temporally disable Cache
+        # return_legacy_cache = False
+        # if use_cache and not isinstance(past_key_values, Cache):
+        #     return_legacy_cache = True
+        #     if past_key_values is None:
+        #         past_key_values = DynamicCache()
+        #     else:
+        #         past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+        #         print(
+        #             "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+        #             "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+        #             "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+        #         )
+
+
         # if inputs_embeds is None:
         #     inputs_embeds = self.embed_tokens(input_ids)
-
+        
         if attention_mask is not None and attention_mask.ndim == 3:
             dtype = inputs_embeds.dtype
             # min_dtype = ms.numpy.finfo(dtype).min
@@ -469,7 +500,7 @@ class Phi3Transformer(nn.Cell):
         else:
             raise Exception("attention_mask parameter was unavailable or invalid")
 
-
+        
 
         hidden_states = inputs_embeds
  
@@ -509,7 +540,6 @@ class Phi3Transformer(nn.Cell):
                 )
 
             hidden_states = layer_outputs[0]
-
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
@@ -518,7 +548,6 @@ class Phi3Transformer(nn.Cell):
 
         # Final layer norm
         hidden_states = self.norm(hidden_states)
-
         # Add hidden states from final layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)

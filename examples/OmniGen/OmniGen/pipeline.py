@@ -46,11 +46,12 @@ class OmniGenPipeline:
     def from_pretrained(cls, model_name, vae_path: str = None):
         config = Phi3Config.from_pretrained(model_name)
         model = OmniGen(config)
-        # load_ckpt_params(model, '/mnt/disk2/nthai/mindone/examples/OmniGen/models/omnigen.ckpt')
+        load_ckpt_params(model, 'models/omnigen.ckpt')
 
         processor = OmniGenProcessor.from_pretrained(model_name)
 
         # Load VAE
+
         if os.path.exists(os.path.join(model_name, "vae")):
             vae = AutoencoderKL.from_pretrained(os.path.join(model_name, "vae"))
         elif vae_path is not None:
@@ -62,11 +63,13 @@ class OmniGenPipeline:
         return cls(vae, model, processor)
 
     def vae_encode(self, x, dtype):
+        print(x.shape)
         if self.vae.config.shift_factor is not None:
-            x = self.vae.encode(x).latent_dist.sample()
+            x = self.vae.diag_gauss_dist.sample(self.vae.encode(x)[0])
             x = (x - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         else:
-            x = self.vae.encode(x).latent_dist.sample() * self.vae.config.scaling_factor
+            x = self.vae.diag_gauss_dist.sample(self.vae.encode(x)[0])
+            x = x * self.vae.config.scaling_factor
         x = x.astype(dtype)
         return x
 
@@ -162,6 +165,7 @@ class OmniGenPipeline:
             use_kv_cache=use_kv_cache,
         )
 
+
         # Choose generation function
         if separate_cfg_infer:
             func = self.model.forward_with_separate_cfg
@@ -171,7 +175,9 @@ class OmniGenPipeline:
         # Generate image
         scheduler = OmniGenScheduler(num_steps=num_inference_steps)
         samples = scheduler(latents, func, model_kwargs, use_kv_cache=use_kv_cache)
-        samples = samples.split(axis=0, output_num=1+num_cfg)[0]
+        # import pdb
+        # pdb.set_trace()
+        samples = samples.chunk(chunks=1+num_cfg, axis=0)[0]
 
         # Decode latents
         samples = samples.astype(ms.float32)
@@ -179,16 +185,17 @@ class OmniGenPipeline:
             samples = samples / self.vae.config.scaling_factor + self.vae.config.shift_factor
         else:
             samples = samples / self.vae.config.scaling_factor
+        
 
-        samples = self.vae.decode(samples).sample
-        samples = (samples * 0.5 + 0.5).clip(0, 1)
+        samples = self.vae.decode(samples)[0]
+        samples = (samples * 0.5 + 0.5).clamp(0, 1)
 
         # Convert to output format
         if output_type == "pt":
             output_images = samples
         else:
             samples = (samples * 255).astype(ms.uint8)
-            samples = samples.transpose(0, 2, 3, 1)
+            samples = samples.permute(0, 2, 3, 1)
             samples = samples.asnumpy()
             output_images = []
             for sample in samples:
@@ -205,6 +212,7 @@ def load_ckpt_params(model: nn.Cell, ckpt: Union[str, Dict]) -> nn.Cell:
         param_dict = ckpt
 
     param_not_load, ckpt_not_load = ms.load_param_into_net(model, param_dict)
+    print("FAILED LOAD: ", param_not_load, ckpt_not_load)
     if not (len(param_not_load) == len(ckpt_not_load) == 0):
         print(
             "Exist ckpt params not loaded: {} (total: {}), or net params not loaded: {} (total: {})".format(

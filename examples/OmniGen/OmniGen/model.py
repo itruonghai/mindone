@@ -332,8 +332,7 @@ class OmniGen(nn.Cell, PreTrainedModel):
         """Forward pass of the model"""
         input_is_list = isinstance(x, (list, tuple))
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
-        time_token = self.time_token(timestep, dtype=x.dtype).expand_dims(1)
-
+        time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)
         if input_img_latents is not None:
             input_latents, _, _ = self.patch_multiple_resolutions(input_img_latents, is_input_images=True)
         
@@ -350,7 +349,6 @@ class OmniGen(nn.Cell, PreTrainedModel):
             input_emb = ops.concat([condition_embeds, time_token, x], axis=1)
         else:
             input_emb = ops.concat([time_token, x], axis=1)
-
         output = self.llm(inputs_embeds=input_emb, 
                          attention_mask=attention_mask, 
                          position_ids=position_ids, 

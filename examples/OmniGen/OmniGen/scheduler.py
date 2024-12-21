@@ -80,14 +80,17 @@ class OmniGenScheduler:
         num_tokens_for_img = z.shape[-1] * z.shape[-2] // 4
         
         # Initialize cache
-        if isinstance(model_kwargs['input_ids'], list):
-            cache = [OmniGenCache(num_tokens_for_img) for _ in range(len(model_kwargs['input_ids']))] if use_kv_cache else None
-        else:
-            cache = OmniGenCache(num_tokens_for_img) if use_kv_cache else None
-
+        # if isinstance(model_kwargs['input_ids'], list):
+        #     cache = [OmniGenCache(num_tokens_for_img) for _ in range(len(model_kwargs['input_ids']))] if use_kv_cache else None
+        # else:
+        #     cache = OmniGenCache(num_tokens_for_img) if use_kv_cache else None
+        
+        cache = None
         # Run diffusion steps
         for i in tqdm(range(self.num_steps)):
             timesteps = ops.zeros(len(z), dtype=z.dtype) + self.sigma[i]
+
+            #TODO delete _z
             pred, cache = func(z, timesteps, past_key_values=cache, **model_kwargs)
             
             sigma_next = self.sigma[i+1]
