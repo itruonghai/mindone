@@ -32,6 +32,7 @@ from ...utils import logging, scale_lora_layers, unscale_lora_layers
 from ...utils.mindspore_utils import randn_tensor
 from ...video_processor import VideoProcessor
 from ..animatediff.pipeline_output import AnimateDiffPipelineOutput
+from ..free_noise_utils import AnimateDiffFreeNoiseMixin
 from ..pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from .pag_utils import PAGMixin
 
@@ -77,6 +78,7 @@ class AnimateDiffPAGPipeline(
     TextualInversionLoaderMixin,
     IPAdapterMixin,
     StableDiffusionLoraLoaderMixin,
+    AnimateDiffFreeNoiseMixin,
     PAGMixin,
 ):
     r"""
@@ -496,6 +498,12 @@ class AnimateDiffPAGPipeline(
     def prepare_latents(
         self, batch_size, num_channels_latents, num_frames, height, width, dtype, generator, latents=None
     ):
+        # If FreeNoise is enabled, generate latents as described in Equation (7) of [FreeNoise](https://arxiv.org/abs/2310.15169)
+        if self.free_noise_enabled:
+            latents = self._prepare_latents_free_noise(
+                batch_size, num_channels_latents, num_frames, height, width, dtype, generator, latents
+            )
+
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -706,6 +714,8 @@ class AnimateDiffPAGPipeline(
         elif self.do_classifier_free_guidance:
             prompt_embeds = ops.cat([negative_prompt_embeds, prompt_embeds])
 
+        prompt_embeds = prompt_embeds.repeat_interleave(repeats=num_frames, dim=0)
+
         if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
             ip_adapter_image_embeds = self.prepare_ip_adapter_image_embeds(
                 ip_adapter_image,
@@ -771,7 +781,7 @@ class AnimateDiffPAGPipeline(
         with self.progress_bar(total=self._num_timesteps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = ops.cat([latents] * (prompt_embeds.shape[0] // latents.shape[0]))
+                latent_model_input = ops.cat([latents] * (prompt_embeds.shape[0] // num_frames // latents.shape[0]))
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # predict the noise residual

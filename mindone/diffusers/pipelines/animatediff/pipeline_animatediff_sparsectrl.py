@@ -27,7 +27,7 @@ from mindone.transformers import CLIPTextModel, CLIPVisionModelWithProjection
 from ...image_processor import PipelineImageInput, VaeImageProcessor
 from ...loaders import IPAdapterMixin, StableDiffusionLoraLoaderMixin, TextualInversionLoaderMixin
 from ...models import AutoencoderKL, ImageProjection, UNet2DConditionModel, UNetMotionModel
-from ...models.controlnet_sparsectrl import SparseControlNetModel
+from ...models.controlnets.controlnet_sparsectrl import SparseControlNetModel
 from ...models.unets.unet_motion_model import MotionAdapter
 from ...schedulers import KarrasDiffusionSchedulers
 from ...utils import logging, scale_lora_layers, unscale_lora_layers
@@ -849,6 +849,8 @@ class AnimateDiffSparseControlNetPipeline(
         # to avoid doing two forward passes
         if self.do_classifier_free_guidance:
             prompt_embeds = ops.cat([negative_prompt_embeds, prompt_embeds])
+
+        prompt_embeds = prompt_embeds.repeat_interleave(repeats=num_frames, dim=0)
 
         # 4. Prepare IP-Adapter embeddings
         if ip_adapter_image is not None or ip_adapter_image_embeds is not None:

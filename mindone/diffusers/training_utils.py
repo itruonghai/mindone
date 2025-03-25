@@ -1,7 +1,6 @@
 import contextlib
 import copy
 import logging
-import math
 import os
 import random
 import time
@@ -44,6 +43,17 @@ def compute_snr(noise_scheduler, timesteps):
     """
     Computes SNR as per
     https://github.com/TiankaiHang/Min-SNR-Diffusion-Training/blob/521b624bd70c67cee4bdf49225915f5945a872e3/guided_diffusion/gaussian_diffusion.py#L847-L849
+    for the given timesteps using the provided noise scheduler.
+
+    Args:
+        noise_scheduler (`NoiseScheduler`):
+            An object containing the noise schedule parameters, specifically `alphas_cumprod`, which is used to compute
+            the SNR values.
+        timesteps (`ms.Tensor`):
+            A tensor of timesteps for which the SNR is computed.
+
+    Returns:
+        `ms.Tensor`: A tensor containing the computed SNR values for each timestep.
     """
     alphas_cumprod = noise_scheduler.alphas_cumprod
     sqrt_alphas_cumprod = alphas_cumprod**0.5
@@ -113,6 +123,12 @@ def compute_dream_and_update_latents(
 
 
 def cast_training_params(model: Union[nn.Cell, List[nn.Cell]], dtype=ms.float32):
+    """
+    Casts the training parameters of the model to the specified data type.
+    Args:
+        model: The PyTorch model whose parameters will be cast.
+        dtype: The data type to which the model parameters will be cast.
+    """
     if not isinstance(model, list):
         model = [model]
     for m in model:
@@ -142,7 +158,8 @@ def _set_state_dict_into_text_encoder(lora_state_dict: Dict[str, ms.Tensor], pre
 def compute_density_for_timestep_sampling(
     weighting_scheme: str, batch_size: int, logit_mean: float = None, logit_std: float = None, mode_scale: float = None
 ):
-    """Compute the density for sampling the timesteps when doing SD3 training.
+    """
+    Compute the density for sampling the timesteps when doing SD3 training.
 
     Courtesy: This was contributed by Rafie Walker in https://github.com/huggingface/diffusers/pull/8528.
 
@@ -154,14 +171,15 @@ def compute_density_for_timestep_sampling(
         u = ops.sigmoid(u)
     elif weighting_scheme == "mode":
         u = ops.rand(batch_size)
-        u = 1 - u - mode_scale * (ops.cos(math.pi * u / 2) ** 2 - 1 + u)
+        u = 1 - u - mode_scale * (ops.cos(ms.numpy.pi * u / 2) ** 2 - 1 + u)
     else:
         u = ops.rand(batch_size)
     return u
 
 
 def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
-    """Computes loss weighting scheme for SD3 training.
+    """
+    Computes loss weighting scheme for SD3 training.
 
     Courtesy: This was contributed by Rafie Walker in https://github.com/huggingface/diffusers/pull/8528.
 
@@ -171,7 +189,7 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
         weighting = (sigmas**-2.0).float()
     elif weighting_scheme == "cosmap":
         bot = 1 - 2 * sigmas + 2 * sigmas**2
-        weighting = 2 / (math.pi * bot)
+        weighting = 2 / (ms.numpy.pi * bot)
     else:
         weighting = ops.ones_like(sigmas)
     return weighting
@@ -232,7 +250,7 @@ class EMAModel:
 
     @classmethod
     def from_pretrained(cls, path, model_cls, foreach=False) -> "EMAModel":
-        _, ema_kwargs = model_cls.load_config(path, return_unused_kwargs=True)
+        _, ema_kwargs = model_cls.from_config(path, return_unused_kwargs=True)
         model = model_cls.from_pretrained(path)
 
         ema_model = cls(model.get_parameters(), model_cls=model_cls, model_config=model.config, foreach=foreach)
@@ -319,7 +337,9 @@ class EMAModel:
         raise NotImplementedError("Not Implemeneted for `pin_memory`.")
 
     def to(self, dtype=None, non_blocking=False) -> None:
-        r"""Move internal buffers of the ExponentialMovingAverage to `device`."""
+        r"""
+        Move internal buffers of the ExponentialMovingAverage to `device`.
+        """
         # .to() on the tensors handles None correctly
         raise NotImplementedError("Not Implemeneted for `to`.")
 
@@ -344,9 +364,10 @@ class EMAModel:
 
     def load_state_dict(self, state_dict: dict) -> None:
         r"""
-        Args:
         Loads the ExponentialMovingAverage state. This method is used by accelerate during checkpointing to save the
         ema state dict.
+
+        Args:
             state_dict (dict): EMA state. Should be an object returned
                 from a call to :meth:`state_dict`.
         """
@@ -861,7 +882,7 @@ def prepare_train_network(
     verbose: bool = False,
     zero_stage: int = 0,
     optimizer_offload: bool = False,
-    op_group: str = None,
+    optimizer_parallel_group: str = None,
     dp_group: str = None,
     comm_fusion: dict = None,
     parallel_modules=None,
@@ -878,7 +899,7 @@ def prepare_train_network(
             the shape should be :math:`()` or :math:`(1,)`.
         zero_stage (`int`, *optional*): Stage setting of ZeRO, default is 0.
         optimizer_offload (`bool`, *optional*): Only take effect when optimizer is AdamWeightDecay, default is False.
-        op_group (`str`, *optional*): The name of the optimizer parallel communication group, default is None.
+        optimizer_parallel_group (`str`, *optional*): The name of the optimizer parallel communication group, default is None.
         dp_group (`str`, *optional*): The name of the data parallel communication group, default is None.
         comm_fusion (`dict`, *optional*): A dict contains the types and configurations
             for setting the communication fusion, default is None, turn off the communication fusion. If set a dict,
@@ -891,19 +912,23 @@ def prepare_train_network(
     """
     if zero_stage not in [0, 1, 2, 3]:
         raise ValueError("Not support zero_stage {zero_stage}")
-    if op_group is None:
+    if optimizer_parallel_group is None:
         logger.warning("Not set zero group, set it WORLD_COMM_GROUP.")
-        op_group = GlobalComm.WORLD_COMM_GROUP
-    if op_group != GlobalComm.WORLD_COMM_GROUP and dp_group is None:
-        raise ValueError("op_group {op_group} and dp_group {dp_group} not full network hccl group coverage")
+        optimizer_parallel_group = GlobalComm.WORLD_COMM_GROUP
+    if optimizer_parallel_group != GlobalComm.WORLD_COMM_GROUP and dp_group is None:
+        raise ValueError(
+            "optimizer_parallel_group {optimizer_parallel_group} and dp_group {dp_group} not full network hccl group coverage"
+        )
 
     is_parallel = _get_parallel_mode() == ParallelMode.DATA_PARALLEL
     if not is_parallel and zero_stage == 0:
         logger.info("No need prepare train_network with zero.")
         zero_helper = None
     else:
-        network = prepare_network(network, zero_stage, op_group, parallel_modules=parallel_modules)
-        zero_helper = ZeroHelper(optimizer, zero_stage, op_group, dp_group, optimizer_offload, comm_fusion)
+        network = prepare_network(network, zero_stage, optimizer_parallel_group, parallel_modules=parallel_modules)
+        zero_helper = ZeroHelper(
+            optimizer, zero_stage, optimizer_parallel_group, dp_group, optimizer_offload, comm_fusion
+        )
 
     if isinstance(scale_sense, float):
         scale_sense = ms.Tensor(scale_sense, ms.float32)
@@ -931,7 +956,7 @@ class DiffusersTrainOneStepWrapper(TrainOneStepWrapper):
         return self.zero_helper is not None and self.zero_stage != 0
 
     def need_save_optimizer(self, args):
-        # TODO: Now we save optimizer in every process, try to save depend on self.zero_helper.op_group
+        # TODO: Now we save optimizer in every process, try to save depend on self.zero_helper.optimizer_parallel_group
         return True if self.use_zero else is_local_master(args)
 
     def save_state(self, args, output_dir, optimizer_state_filter=lambda x: True):
@@ -944,19 +969,24 @@ class DiffusersTrainOneStepWrapper(TrainOneStepWrapper):
             optimizer_file = os.path.join(output_dir, "mindspore_model", f"zero_pp_{args.local_rank}_optim_states.ckpt")
         elif self.need_save_optimizer(args):
             optimizer_file = os.path.join(output_dir, "optimizer.ckpt")
-        ms.save_checkpoint(self.optimizer, optimizer_file, choice_func=optimizer_state_filter)
+        else:
+            optimizer_file = None
 
-        # Loss Scaler states
-        loss_scaler_file = os.path.join(output_dir, "loss_scaler.ckpt")
-        loss_scaler_states = {"scale_sense": self.scale_sense}
-        if self.loss_scaling_manager:
-            loss_scaler_states.update(
-                {
-                    "cur_iter": self.loss_scaling_manager.cur_iter,
-                    "last_overflow_iter": self.loss_scaling_manager.last_overflow_iter,
-                }
-            )
-        ms.save_checkpoint(loss_scaler_states, loss_scaler_file)
+        if optimizer_file:
+            ms.save_checkpoint(self.optimizer, optimizer_file, choice_func=optimizer_state_filter)
+
+        if is_master(args):
+            # Loss Scaler states
+            loss_scaler_file = os.path.join(output_dir, "loss_scaler.ckpt")
+            loss_scaler_states = {"scale_sense": self.scale_sense}
+            if self.loss_scaling_manager:
+                loss_scaler_states.update(
+                    {
+                        "cur_iter": self.loss_scaling_manager.cur_iter,
+                        "last_overflow_iter": self.loss_scaling_manager.last_overflow_iter,
+                    }
+                )
+            ms.save_checkpoint(loss_scaler_states, loss_scaler_file)
 
     def load_state(self, args, input_dir, optimizer_state_filter=lambda x: True):
         # Optimizer states

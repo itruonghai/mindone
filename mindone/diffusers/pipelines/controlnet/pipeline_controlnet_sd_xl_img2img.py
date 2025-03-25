@@ -32,13 +32,12 @@ from ...loaders import (
     StableDiffusionXLLoraLoaderMixin,
     TextualInversionLoaderMixin,
 )
-from ...models import AutoencoderKL, ControlNetModel, ImageProjection, UNet2DConditionModel
+from ...models import AutoencoderKL, ControlNetModel, ImageProjection, MultiControlNetModel, UNet2DConditionModel
 from ...schedulers import KarrasDiffusionSchedulers
 from ...utils import deprecate, is_invisible_watermark_available, logging, scale_lora_layers, unscale_lora_layers
 from ...utils.mindspore_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from ..stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
-from .multicontrolnet import MultiControlNetModel
 
 if is_invisible_watermark_available():
     from ..stable_diffusion_xl.watermark import StableDiffusionXLWatermarker
@@ -998,6 +997,10 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
     def num_timesteps(self):
         return self._num_timesteps
 
+    @property
+    def interrupt(self):
+        return self._interrupt
+
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -1264,6 +1267,7 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
         self._guidance_scale = guidance_scale
         self._clip_skip = clip_skip
         self._cross_attention_kwargs = cross_attention_kwargs
+        self._interrupt = False
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
@@ -1432,6 +1436,9 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                if self.interrupt:
+                    continue
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = ops.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 # TODO: method of scheduler should not change the dtype of input.
@@ -1464,7 +1471,6 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
                     if isinstance(controlnet_cond_scale, list):
                         controlnet_cond_scale = controlnet_cond_scale[0]
                     cond_scale = controlnet_cond_scale * controlnet_keep[i]
-
                 down_block_res_samples, mid_block_res_sample = self.controlnet(
                     control_model_input,
                     t,

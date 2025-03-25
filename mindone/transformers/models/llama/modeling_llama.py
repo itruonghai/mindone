@@ -17,6 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -26,13 +27,15 @@ from transformers.utils import add_start_docstrings, add_start_docstrings_to_mod
 import mindspore as ms
 from mindspore import Parameter, Tensor, nn, ops
 from mindspore.common import initializer as init
+from mindspore.ops.operations.nn_ops import FlashAttentionScore
 
 from ...activations import ACT2FN
-from ...cache_utils import get_max_length, get_seq_length, update
+from ...cache_utils import get_max_length, get_seq_length, init_static_cache, update
 from ...mindspore_adapter import recompute_except_output
-from ...mindspore_adapter.attention import FlashAttention2
+
+# from ...mindspore_adapter.attention import FlashAttention2
 from ...mindspore_utils import ALL_LAYERNORM_LAYERS
-from ...modeling_attn_mask_utils import _MIN_FP16
+from ...modeling_attn_mask_utils import _MIN_FP16  # , dtype_to_min
 from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 from ...modeling_utils import MSPreTrainedModel as PreTrainedModel
 
@@ -71,7 +74,8 @@ class LlamaRotaryEmbedding(nn.Cell):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         inv_freq = 1.0 / (self.base ** (np.arange(0, self.dim, 2).astype(np.float32) / self.dim))
-        self.inv_freq = Parameter(Tensor(inv_freq, ms.float32), requires_grad=False, name="inv_freq_buffer")
+        # self.inv_freq = Parameter(Tensor(inv_freq, ms.float32), requires_grad=False, name="inv_freq_buffer")
+        self.inv_freq = Tensor(inv_freq, ms.float32)
         # For BC we register cos and sin cached
         self.max_seq_len_cached = max_position_embeddings
 
@@ -279,7 +283,7 @@ class LlamaAttention(nn.Cell):
         hidden_states: ms.Tensor,
         attention_mask: Optional[ms.Tensor] = None,
         position_ids: Optional[ms.Tensor] = None,
-        past_key_value: Optional[ms.Tensor] = None,
+        past_key_value: Optional[Tuple[ms.Tensor, ms.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[ms.Tensor] = None,
@@ -314,7 +318,7 @@ class LlamaAttention(nn.Cell):
         cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_value is not None and use_cache:
             key_states, value_states = update(past_key_value, key_states, value_states, cache_position)
             past_key_value = (key_states, value_states)
 
@@ -361,9 +365,9 @@ class LlamaFlashAttention2(LlamaAttention):
 
     def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
-
-        self.flash_attention = FlashAttention2(
-            self.head_dim, self.num_heads, self.attention_dropout, input_layout="BNSD", dtype=ms.float16
+        scale_factor = 1 / math.sqrt(self.head_dim)
+        self.flash_attention = FlashAttentionScore(
+            self.num_heads, keep_prob=1 - self.attention_dropout, scale_value=scale_factor, input_layout="BNSD"
         )
 
     def convert_mask_to_fa_format(self, attention_mask):
@@ -434,8 +438,11 @@ class LlamaFlashAttention2(LlamaAttention):
         # 1. flash attention
         if attention_mask is not None:  # no matter the length, we just slice it
             attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attention_mask = self.convert_mask_to_fa_format(attention_mask)
-        attn_output = self.flash_attention(query_states, key_states, value_states, attention_mask)
+        # flip mask to ms FA format, 1 - drop, 0 - retain
+        attention_mask = (-attention_mask).to(ms.bool_)
+        _, _, _, attn_output = self.flash_attention(
+            query_states, key_states, value_states, None, None, None, attention_mask
+        )
         # assert attn_output.shape == (bsz, self.num_heads, q_len, self.head_dim)
 
         # 2. vanilla attention
@@ -475,7 +482,6 @@ class LlamaDecoderLayer(nn.Cell):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-
         self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
 
         self.mlp = LlamaMLP(config)
@@ -742,6 +748,17 @@ class LlamaModel(LlamaPreTrainedModel):
 
         logger.info(f"{self.__class__.__name__}: enable recompute.")
 
+    def prepare_static_cache(self, input_embeds, max_cache_len):
+        bs = input_embeds.shape[0]
+        max_batch_size, cache_dtype = (
+            getattr(self.config, "num_beams", 1) * bs,
+            self.dtype,
+        )
+        past_key_values = init_static_cache(
+            config=self.config, max_batch_size=max_batch_size, max_cache_len=max_cache_len, dtype=cache_dtype
+        )
+        return past_key_values
+
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def construct(
         self,
@@ -773,7 +790,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         if cache_position is None:
             past_seen_tokens = get_seq_length(past_key_values) if past_key_values is not None else 0
-            cache_position = ops.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1])
+            cache_position = ops.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], dtype=ms.int32)
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
@@ -861,9 +878,10 @@ class LlamaModel(LlamaPreTrainedModel):
             if sequence_length != 1:
                 causal_mask = ops.triu(causal_mask, diagonal=1)
             _mask_position = ops.arange(target_length) > cache_position.reshape(-1, 1)
-            causal_mask *= _mask_position
+            causal_mask = causal_mask * _mask_position
             causal_mask = causal_mask[None, None, :, :].broadcast_to((input_tensor.shape[0], 1, -1, -1))
             if attention_mask is not None:
+                causal_mask = causal_mask.clone()  # copy to contiguous memory for -in-place edit
                 mask_length = attention_mask.shape[-1]
                 padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
                 padding_mask = padding_mask == 0
@@ -978,7 +996,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             logits = ops.cat(logits, axis=-1)
         else:
             logits = self.lm_head(hidden_states)
-        logits = logits.to(ms.float32)
 
         loss = None
         if labels is not None:
@@ -989,7 +1006,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             shift_logits = shift_logits.view(-1, self.vocab_size)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
-            loss = self.cross_entropy_loss(shift_logits, shift_labels)
+            loss = self.cross_entropy_loss(shift_logits.float(), shift_labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]

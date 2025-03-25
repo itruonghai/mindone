@@ -170,13 +170,21 @@ class Upsample2D(nn.Cell):
         # if `output_size` is passed we force the interpolation output
         # size and do not make use of `scale_factor=2`
         if self.interpolate:
+            # upsample_nearest_nhwc also fails when the number of output elements is large
+            # https://github.com/pytorch/pytorch/issues/141831
+            scale_factor = (
+                2 if output_size is None else max([f / s for f, s in zip(output_size, hidden_states.shape[-2:])])
+            )
+            if hidden_states.numel() * scale_factor > pow(2, 31):
+                hidden_states = hidden_states.contiguous()
+
             if output_size is None:
                 _, _, h, w = hidden_states.shape
                 hidden_states = ops.interpolate(hidden_states, size=(h * 2, w * 2), mode="nearest")
             else:
                 hidden_states = ops.interpolate(hidden_states, size=output_size, mode="nearest")
 
-        # If the input is bfloat16, we cast back to bfloat16
+        # Cast back to original dtype
         if dtype == ms.bfloat16:
             hidden_states = hidden_states.to(dtype)
 
